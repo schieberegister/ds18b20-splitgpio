@@ -92,44 +92,55 @@ esp_err_t onewire_init(gpio_num_t gpio_out, gpio_num_t gpio_in) {
 }
 
 esp_err_t ds18b20_search_sensors(onewire_addr_t *devices, int *num_devices) {
-    *num_devices = 0;
     if (!onewire_initialized) return ESP_ERR_INVALID_STATE;
 
-    uint8_t rom[8];
     int device_count = 0;
+    uint8_t rom[8];
     uint8_t last_discrepancy = 0;
     uint8_t last_device_flag = 0;
 
+    *num_devices = 0;
+
     while (!last_device_flag && device_count < MAX_SENSORS) {
-        if (!onewire_reset()) break;
+        if (!onewire_reset()) {
+            break;
+        }
 
-        onewire_write_byte(0xF0); // SEARCH ROM command
+        onewire_write_byte(0xF0);  // SEARCH ROM command
 
-        uint8_t rom_byte_number = 0;
         uint8_t rom_byte_mask = 1;
+        uint8_t rom_byte_number = 0;
+        uint8_t discrepancy_marker = 0;
+
         memset(rom, 0, sizeof(rom));
 
-        for (int id_bit_number = 1; id_bit_number <= 64; id_bit_number++) {
+        for (uint8_t id_bit_number = 1; id_bit_number <= 64; id_bit_number++) {
             int id_bit = onewire_read_bit();
             int cmp_id_bit = onewire_read_bit();
-
             int search_direction;
 
-            if (id_bit == 1 && cmp_id_bit == 1) break;
-            if (id_bit == 0 && cmp_id_bit == 0) {
+            if (id_bit == 1 && cmp_id_bit == 1) {
+                // No devices participating
+                return (device_count > 0) ? ESP_OK : ESP_ERR_NOT_FOUND;
+            } else if (id_bit == 0 && cmp_id_bit == 0) {
                 if (id_bit_number == last_discrepancy) {
                     search_direction = 1;
                 } else if (id_bit_number > last_discrepancy) {
                     search_direction = 0;
-                    last_discrepancy = id_bit_number;
+                    discrepancy_marker = id_bit_number;
                 } else {
-                    search_direction = ((rom[rom_byte_number] & rom_byte_mask) ? 1 : 0);
+                    search_direction = (rom[rom_byte_number] & rom_byte_mask) ? 1 : 0;
+                    if (search_direction == 0) {
+                        discrepancy_marker = id_bit_number;
+                    }
                 }
             } else {
-                search_direction = id_bit;
+                search_direction = (id_bit == 1) ? 1 : 0;
             }
 
-            if (search_direction == 1) rom[rom_byte_number] |= rom_byte_mask;
+            if (search_direction == 1) {
+                rom[rom_byte_number] |= rom_byte_mask;
+            }
 
             onewire_write_bit(search_direction);
 
@@ -140,18 +151,22 @@ esp_err_t ds18b20_search_sensors(onewire_addr_t *devices, int *num_devices) {
             }
         }
 
-        if (ds18b20_crc8(rom, 7) != rom[7]) continue;
-
-        memcpy(&devices[device_count++], rom, 8);
+        last_discrepancy = discrepancy_marker;
 
         if (last_discrepancy == 0) {
             last_device_flag = 1;
         }
 
-        if (last_device_flag || device_count >= MAX_SENSORS) break;
+        if (ds18b20_crc8(rom, 7) == rom[7]) {
+            memcpy(&devices[device_count++], rom, 8);
+        } else {
+            // CRC failure; retry or skip
+            continue;
+        }
     }
 
     *num_devices = device_count;
+
     return (device_count > 0) ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
